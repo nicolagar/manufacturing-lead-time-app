@@ -9,6 +9,7 @@ import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 SHEET_NAME = "PERT"
@@ -40,6 +41,7 @@ class ComputeRequest(BaseModel):
 
 app = FastAPI(title="Manufacturing Lead Time Web App")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def normalize_text(value) -> str:
     if pd.isna(value): return ""
@@ -84,13 +86,25 @@ def build_formula_map(formula_df: pd.DataFrame) -> Dict[str, str]:
 
 def extract_formula_variables(expression: str) -> List[str]:
     tree = ast.parse(expression, mode="eval")
-    funcs = {"abs","min","max","round","ceil","floor","sqrt"}
-    return [n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id not in funcs]
+    funcs = {"abs","min","max","round","ceil","floor","sqrt","log","ln","log10","exp","sin","cos","tan","asin","acos","atan","atan2","sinh","cosh","tanh","pi","e"}
+    return sorted({n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id not in funcs})
 
 def safe_eval_formula(expression: str, variables: Dict[str, float]) -> float:
-    funcs = {"abs":abs,"min":min,"max":max,"round":round,"ceil":math.ceil,"floor":math.floor,"sqrt":math.sqrt}
-    allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
-               ast.USub, ast.UAdd, ast.Load, ast.Name, ast.Constant, ast.Call, ast.FloorDiv)
+    funcs = {
+        "abs": abs, "min": min, "max": max, "round": round,
+        "ceil": math.ceil, "floor": math.floor, "sqrt": math.sqrt,
+        "log": math.log, "ln": math.log, "log10": math.log10, "exp": math.exp,
+        "sin": math.sin, "cos": math.cos, "tan": math.tan,
+        "asin": math.asin, "acos": math.acos, "atan": math.atan, "atan2": math.atan2,
+        "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+        "pi": math.pi, "e": math.e,
+    }
+    allowed = (
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
+        ast.USub, ast.UAdd, ast.Load, ast.Name, ast.Constant, ast.Call, ast.FloorDiv,
+        ast.IfExp, ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+        ast.BoolOp, ast.And, ast.Or, ast.Not
+    )
     tree = ast.parse(expression, mode="eval")
     for node in ast.walk(tree):
         if not isinstance(node, allowed):
@@ -100,7 +114,10 @@ def safe_eval_formula(expression: str, variables: Dict[str, float]) -> float:
                 raise PertDataError(f"Unsupported function in formula: {expression}")
         if isinstance(node, ast.Name) and node.id not in variables and node.id not in funcs:
             raise PertDataError(f"Missing variable '{node.id}' for formula: {expression}")
-    result = float(eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, {**funcs, **variables}))
+    result = eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, {**funcs, **variables})
+    if isinstance(result, bool):
+        return float(result)
+    result = float(result)
     if math.isnan(result) or math.isinf(result):
         raise PertDataError(f"Formula produced invalid numeric value: {expression}")
     return result
@@ -454,10 +471,10 @@ def compute_hierarchical_schedule(df: pd.DataFrame) -> Dict:
     ensure_no_nan(result)
     return result
 
-HTML_PAGE = """<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Manufacturing Lead Time Calculator</title><style>body{margin:0;font-family:Arial,sans-serif;background:#f8fafc;color:#0f172a}.wrap{max-width:1520px;margin:0 auto;padding:24px}.grid-top{display:grid;grid-template-columns:1.6fr 1fr;gap:16px;margin-bottom:16px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:20px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}button,.file-label{border:1px solid #e2e8f0;background:#fff;border-radius:14px;padding:10px 14px;cursor:pointer}button.primary{background:#2563eb;color:#fff;border-color:#2563eb}.file-label input{display:none}.badge{display:inline-block;background:#eef2ff;color:#3730a3;padding:6px 10px;border-radius:999px;font-size:12px}.status-ok{border-radius:16px;padding:14px;margin-top:8px;background:#d1fae5;color:#065f46}.status-warn{border-radius:16px;padding:14px;margin-top:8px;background:#fef3c7;color:#92400e}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.stat{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px}.stat-label{color:#64748b;font-size:12px;text-transform:uppercase}table{width:100%;border-collapse:separate;border-spacing:0 10px}th{text-align:left;color:#64748b;font-size:13px;padding:0 8px;white-space:nowrap}td{padding:0 8px}input[type=text],input[type=number]{width:100%;border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px;font-size:14px}.section{margin-top:16px}.scroll{overflow-x:auto}.chart-box{overflow-x:auto;border:1px solid #e2e8f0;border-radius:16px;background:#fff;padding:10px}.small{font-size:12px;color:#64748b}@media (max-width:900px){.grid-top{grid-template-columns:1fr}.stats{grid-template-columns:1fr}}</style><script src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'></script></head><body><div class='wrap'><div class='grid-top'><div class='card'><h1>Manufacturing Lead Time Calculator</h1><p>Supports hierarchical decomposition with <b>refines</b>. Use <b>INHERITED</b> in duration when the process duration must come from its child network lead time.</p><div class='actions'><button onclick='downloadTemplate()'>Download template</button><button onclick='downloadCurrentInput()'>Download current input</button><label class='file-label'>Upload Excel<input type='file' accept='.xlsx,.xls' onchange='uploadExcel(event)'></label><button onclick='addRow()'>Add row</button><button onclick='addVariable()'>Add variable</button><button class='primary' onclick='runCalculation()'>Run</button></div><div style='margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;'><span id='loadedFile' class='badge' style='display:none;'></span><span class='badge'>Sheets: PERT + FORMULA</span><span class='badge'>Python file: manufacturing_lead_time_standalone_webapp_hierarchical_v8.py</span></div><div style='margin-top:12px;padding:12px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc'><div class='small' style='margin-bottom:6px'><b>Render start command</b></div><div style='font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;'>uvicorn manufacturing_lead_time_standalone_webapp_hierarchical_v8:app --host 0.0.0.0 --port $PORT</div></div></div><div class='card'><h2>Summary</h2><div id='summary'></div></div></div><div class='card section'><h2>Input table</h2><p class='small'>Use refines to point to the parent process. Use duration = <b>INHERITED</b> when a parent process must roll up the lead time of its child network. Predecessor and successor references must stay within the same refines level.</p><div class='scroll'><table><thead><tr id='headerRow'></tr></thead><tbody id='rowsBody'></tbody></table></div></div><div class='card section'><h2>Formula table</h2><div class='scroll'><table><thead><tr><th>Name</th><th>Formula</th><th></th></tr></thead><tbody id='formulaBody'></tbody></table></div></div><div class='card section'><h2>Gantt chart</h2><div class='small' style='margin-bottom:8px'>Each bar shows start time (S), duration (D), and end time (E).</div><div id='ganttContainer' class='chart-box'></div></div><div class='card section'><h2>Network diagram</h2><div class='small' style='margin-bottom:8px'>Parents with children can be expanded/collapsed with +/- buttons. Children are drawn inside the parent container. The diagram uses a clean recursive PERT layout with orthogonal connectors, pan, zoom, and fit-to-screen.</div><div id='networkContainer' class='chart-box'></div></div><div class='card section'><h2>Calculated schedule</h2><div class='scroll'><table id='scheduleTable'></table></div></div></div><script>
+HTML_PAGE = """<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Manufacturing Lead Time Calculator</title><style>body{margin:0;font-family:Arial,sans-serif;background:#f8fafc;color:#0f172a}.wrap{max-width:1520px;margin:0 auto;padding:24px}.grid-top{display:grid;grid-template-columns:1.6fr 1fr;gap:16px;margin-bottom:16px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:20px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}button,.file-label{border:1px solid #e2e8f0;background:#fff;border-radius:14px;padding:10px 14px;cursor:pointer}button.primary{background:#2563eb;color:#fff;border-color:#2563eb}.file-label input{display:none}.badge{display:inline-block;background:#eef2ff;color:#3730a3;padding:6px 10px;border-radius:999px;font-size:12px}.status-ok{border-radius:16px;padding:14px;margin-top:8px;background:#d1fae5;color:#065f46}.status-warn{border-radius:16px;padding:14px;margin-top:8px;background:#fef3c7;color:#92400e}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.stat{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px}.stat-label{color:#64748b;font-size:12px;text-transform:uppercase}table{width:100%;border-collapse:separate;border-spacing:0 10px}th{text-align:left;color:#64748b;font-size:13px;padding:0 8px;white-space:nowrap}td{padding:0 8px}input[type=text],input[type=number]{width:100%;border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px;font-size:14px}.section{margin-top:16px}.scroll{overflow-x:auto}.chart-box{overflow-x:auto;border:1px solid #e2e8f0;border-radius:16px;background:#fff;padding:10px}.small{font-size:12px;color:#64748b}@media (max-width:900px){.grid-top{grid-template-columns:1fr}.stats{grid-template-columns:1fr}}</style><script src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'></script><script src='/static/router_validator.js'></script><script src='/static/router.js'></script></head><body><div class='wrap'><div class='grid-top'><div class='card'><h1>Manufacturing Lead Time Calculator by N.Gargano</h1><p>Supports hierarchical decomposition with <b>refines</b>. Use <b>INHERITED</b> in duration when the process duration must come from its child network lead time.</p><div class='actions'><button onclick='downloadTemplate()'>Download template</button><button onclick='downloadCurrentInput()'>Download current input</button><label class='file-label'>Upload Excel<input type='file' accept='.xlsx,.xls' onchange='uploadExcel(event)'></label><button onclick='addRow()'>Add row</button><button onclick='addVariable()'>Add variable</button><button class='primary' onclick='runCalculation()'>Run</button></div><div style='margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;'><span id='loadedFile' class='badge' style='display:none;'></span><span class='badge'>Sheets: PERT + FORMULA</span></div><div style='font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;'></div></div></div><div class='card'><h2>Summary</h2><div id='summary'></div></div></div><div class='card section'><h2>Input table</h2><p class='small'>Use refines to point to the parent process. Use duration = <b>INHERITED</b> when a parent process must roll up the lead time of its child network. Predecessor and successor references must stay within the same refines level.</p><div class='scroll'><table><thead><tr id='headerRow'></tr></thead><tbody id='rowsBody'></tbody></table></div></div><div class='card section'><h2>Formula table</h2><div class='scroll'><table><thead><tr><th>Name</th><th>Formula</th><th></th></tr></thead><tbody id='formulaBody'></tbody></table></div></div><div class='card section'><h2>Gantt chart</h2><div class='small' style='margin-bottom:8px'>Each bar shows start time (S), duration (D), and end time (E).</div><div id='ganttContainer' class='chart-box'></div></div><div class='card section'><h2>Network diagram</h2><div class='small' style='margin-bottom:8px'></div><div id='networkContainer' class='chart-box'></div></div><div class='card section'><h2>Calculated schedule</h2><div class='scroll'><table id='scheduleTable'></table></div></div></div><script>
 const sampleRows=%SAMPLE_ROWS_JSON%;const sampleFormulas=%SAMPLE_FORMULAS_JSON%;let rows=structuredClone(sampleRows);let formulas=structuredClone(sampleFormulas);let variableColumns=[];let expandedParents={};
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function extractFormulaVariables(expr){const names=(String(expr||'').match(/[A-Za-z_]\\w*/g)||[]);const funcs=new Set(['abs','min','max','round','ceil','floor','sqrt']);return [...new Set(names.filter(n=>!funcs.has(n)))];}
+function extractFormulaVariables(expr){const names=(String(expr||'').match(/[A-Za-z_]\\w*/g)||[]);const funcs=new Set(['abs','min','max','round','ceil','floor','sqrt','log','ln','log10','exp','sin','cos','tan','asin','acos','atan','atan2','sinh','cosh','tanh','pi','e','if','and','or','not']);return [...new Set(names.filter(n=>!funcs.has(n)))];}
 function syncVariableColumns(){const fixed=['process','refines','predecessor','successor','duration'];const fromRows=Object.keys(rows.reduce((a,r)=>Object.assign(a,r),{})).filter(k=>!fixed.includes(k));const fromFormulas=[...new Set(formulas.flatMap(f=>extractFormulaVariables(f.formula)))];variableColumns=[...new Set([...variableColumns,...fromRows,...fromFormulas])].filter(v=>v&&/^[A-Za-z_]\\w*$/.test(v));rows=rows.map(r=>{const o={process:r.process||'',refines:r.refines||'',predecessor:r.predecessor||'NA',successor:r.successor||'STOP',duration:r.duration??''};variableColumns.forEach(v=>o[v]=r[v]??'');return o;});}
 function renameVariable(oldName,newName){newName=String(newName||'').trim();if(!newName||oldName===newName||variableColumns.includes(newName))return;variableColumns=variableColumns.map(v=>v===oldName?newName:v);rows=rows.map(r=>{r[newName]=r[oldName]??'';delete r[oldName];return r;});formulas=formulas.map(f=>({name:f.name,formula:String(f.formula||'').replace(new RegExp(`\\\\b${oldName}\\\\b`,'g'),newName)}));renderAll();}
 function addVariable(){const base='var';let i=1,name=`${base}${i}`;while(variableColumns.includes(name)){i++;name=`${base}${i}`;}variableColumns.push(name);rows=rows.map(r=>({...r,[name]:''}));renderAll();}
@@ -554,12 +571,13 @@ function renderGantt(data){
 function computeLevels(graph){const incoming={},out={};graph.nodes.forEach(n=>{incoming[n.id]=[];out[n.id]=[];});graph.edges.forEach(e=>{incoming[e.to].push(e.from);out[e.from].push(e.to);});const levels={},queue=graph.nodes.filter(n=>incoming[n.id].length===0).map(n=>n.id).sort();queue.forEach(id=>levels[id]=0);while(queue.length){const id=queue.shift();out[id].forEach(next=>{const proposed=(levels[id]||0)+1;levels[next]=Math.max(levels[next]||0,proposed);incoming[next]=incoming[next].filter(x=>x!==id);if(incoming[next].length===0)queue.push(next);});}return levels;}
 
 
-let networkViewport={scale:1,tx:0,ty:0,minScale:0.2,maxScale:4,contentW:1200,contentH:500};
 
-function toggleParent(process){
-  expandedParents[process]=!expandedParents[process];
-  if(window.__lastNetworkData){renderNetwork(window.__lastNetworkData,false);}
-}
+
+
+
+let networkViewport={scale:1,tx:0,ty:0,minScale:0.2,maxScale:3.5,contentW:1400,contentH:760};
+
+function toggleParent(process){}
 function setNetworkBadge(){
   const el=document.getElementById('networkZoomBadge');
   if(el) el.textContent=`Zoom: ${Math.round(networkViewport.scale*100)}%`;
@@ -593,11 +611,6 @@ function zoomNetwork(factor,cx=null,cy=null){
 function applyNetworkTransform(){
   const g=document.getElementById('networkPanZoomGroup');
   if(g) g.setAttribute('transform',`translate(${networkViewport.tx},${networkViewport.ty}) scale(${networkViewport.scale})`);
-  const svg=document.getElementById('networkSvgRoot');
-  if(svg){
-    const detailClass=networkViewport.scale<0.55?'low-detail':networkViewport.scale<0.9?'mid-detail':'high-detail';
-    svg.setAttribute('data-detail',detailClass);
-  }
   setNetworkBadge();
 }
 function installNetworkInteraction(){
@@ -606,7 +619,6 @@ function installNetworkInteraction(){
   let dragging=false,startX=0,startY=0,baseTx=0,baseTy=0;
   host.onwheel=(e)=>{e.preventDefault();zoomNetwork(e.deltaY<0?1.12:1/1.12,e.clientX,e.clientY);};
   host.onmousedown=(e)=>{
-    if(e.target.closest('[data-toggle-parent]')) return;
     dragging=true; startX=e.clientX; startY=e.clientY; baseTx=networkViewport.tx; baseTy=networkViewport.ty;
     host.style.cursor='grabbing';
   };
@@ -620,253 +632,122 @@ function installNetworkInteraction(){
   host.style.cursor='grab';
 }
 
+function groupRowsByParent(schedule){
+  const byParent={};
+  (schedule||[]).forEach(r=>{const p=r.refines||'';(byParent[p]||(byParent[p]=[])).push(r);});
+  Object.values(byParent).forEach(arr=>arr.sort((a,b)=>a.earliest_start-b.earliest_start||a.process.localeCompare(b.process)));
+  return byParent;
+}
+function edgesForParent(graph, scheduleMap, parent){
+  return (graph.edges||[]).filter(e=>(scheduleMap[e.from]?.refines||'')===parent && (scheduleMap[e.to]?.refines||'')===parent);
+}
+function computeLevels(rows, edges){
+  const ids=rows.map(r=>r.process), incoming={}, outgoing={};
+  ids.forEach(id=>{incoming[id]=[]; outgoing[id]=[];});
+  edges.forEach(e=>{if(incoming[e.to]&&outgoing[e.from]){incoming[e.to].push(e.from); outgoing[e.from].push(e.to);}});
+  const levels={}, queue=ids.filter(id=>incoming[id].length===0).sort();
+  queue.forEach(id=>levels[id]=0);
+  while(queue.length){
+    const id=queue.shift();
+    outgoing[id].forEach(next=>{
+      levels[next]=Math.max(levels[next]||0,(levels[id]||0)+1);
+      incoming[next]=incoming[next].filter(x=>x!==id);
+      if(incoming[next].length===0) queue.push(next);
+    });
+  }
+  let changed=true;
+  while(changed){
+    changed=false;
+    edges.forEach(e=>{
+      const a=levels[e.from]??0, b=levels[e.to]??0;
+      if(b<=a){levels[e.to]=a+1; changed=true;}
+    });
+  }
+  ids.forEach(id=>{if(levels[id]===undefined) levels[id]=0;});
+  return levels;
+}
+function computeLanes(rows, edges, levels){
+  const byLevel={}; rows.forEach(r=>{const lvl=levels[r.process]||0;(byLevel[lvl]||(byLevel[lvl]=[])).push(r);});
+  const laneOf={}, used={};
+  Object.keys(byLevel).map(Number).sort((a,b)=>a-b).forEach(level=>{
+    byLevel[level].sort((a,b)=>a.earliest_start-b.earliest_start||a.process.localeCompare(b.process));
+    byLevel[level].forEach(row=>{
+      const preds=edges.filter(e=>e.to===row.process).map(e=>e.from).filter(p=>laneOf[p]!==undefined);
+      let pref=preds.length?Math.round(preds.reduce((s,p)=>s+laneOf[p],0)/preds.length):0;
+      let lane=pref;
+      while((used[level]||new Set()).has(lane)) lane++;
+      (used[level]||(used[level]=new Set())).add(lane);
+      laneOf[row.process]=lane;
+    });
+  });
+  return laneOf;
+}
+function drawOrthoPath(points,color,strokeW,marker){
+  const d=points.map((p,i)=>`${i===0?'M':'L'} ${p.x} ${p.y}`).join(' ');
+  return `<path d="${d}" fill="none" stroke="${color}" stroke-width="${strokeW}" marker-end="url(#${marker})" stroke-linecap="round" stroke-linejoin="round" />`;
+}
+function simplifyPoints(points){
+  const out=[points[0]];
+  for(let i=1;i<points.length;i++){
+    const p=points[i], q=out[out.length-1];
+    if(p.x!==q.x || p.y!==q.y) out.push(p);
+  }
+  return out;
+}
+
+
 function renderNetwork(data,shouldFit=true){
-  window.__lastNetworkData=data;
-  const schedule=data.schedule||[];
-  const scheduleMap={}; schedule.forEach(r=>scheduleMap[r.process]=r);
-  const graph=data.graph||{nodes:[],edges:[]};
-  const allEdges=graph.edges||[];
-  const childrenByParent={};
-  schedule.forEach(r=>{const p=r.refines||'';(childrenByParent[p]||(childrenByParent[p]=[])).push(r);});
-  Object.values(childrenByParent).forEach(arr=>arr.sort((a,b)=>a.earliest_start-b.earliest_start||a.process.localeCompare(b.process)));
-
-  function computeLevels(rows, edges){
-    const ids=rows.map(r=>r.process), incoming={}, outgoing={};
-    ids.forEach(id=>{incoming[id]=[]; outgoing[id]=[];});
-    edges.forEach(e=>{if(incoming[e.to]&&outgoing[e.from]){incoming[e.to].push(e.from); outgoing[e.from].push(e.to);}});
-    const levels={}, queue=ids.filter(id=>incoming[id].length===0).sort();
-    queue.forEach(id=>levels[id]=0);
-    while(queue.length){
-      const id=queue.shift();
-      outgoing[id].forEach(next=>{
-        levels[next]=Math.max(levels[next]||0,(levels[id]||0)+1);
-        incoming[next]=incoming[next].filter(x=>x!==id);
-        if(incoming[next].length===0) queue.push(next);
-      });
-    }
-    ids.forEach(id=>{if(levels[id]===undefined) levels[id]=0;});
-    return levels;
+  if(!window.ProvenRouter || !window.RouterValidator){
+    document.getElementById('networkContainer').innerHTML='<div class="status-warn">Router module not loaded.</div>';
+    return;
   }
-  function computeLanes(rows, edges, levels){
-    const byLevel={}; rows.forEach(r=>{const lvl=levels[r.process]||0;(byLevel[lvl]||(byLevel[lvl]=[])).push(r);});
-    const laneOf={}, used={};
-    Object.keys(byLevel).map(Number).sort((a,b)=>a-b).forEach(level=>{
-      byLevel[level].sort((a,b)=>a.earliest_start-b.earliest_start||a.process.localeCompare(b.process));
-      byLevel[level].forEach(row=>{
-        const preds=edges.filter(e=>e.to===row.process).map(e=>e.from).filter(p=>laneOf[p]!==undefined);
-        let pref=preds.length?Math.round(preds.reduce((s,p)=>s+laneOf[p],0)/preds.length):0;
-        let lane=pref;
-        while((used[level]||new Set()).has(lane)) lane++;
-        (used[level]||(used[level]=new Set())).add(lane);
-        laneOf[row.process]=lane;
-      });
-    });
-    return laneOf;
-  }
+  const model = window.ProvenRouter.buildRecursiveRouteModel(data);
+  const report = window.RouterValidator.validateRecursiveRouteModel(model);
 
-  const positions={}, containers={}, visibleNodeIds=new Set(), subtreeSizeCache={};
-  const containerChildren={};
-  function estimateSubtree(proc){
-    if(subtreeSizeCache[proc]) return subtreeSizeCache[proc];
-    const children=(childrenByParent[proc]||[]).filter(r=>r.process!==proc);
-    let extraCols=0, extraRows=0;
-    if(children.length && expandedParents[proc]){
-      const childIds=children.map(r=>r.process);
-      const childEdges=allEdges.filter(e=>(scheduleMap[e.from]?.refines||'')===proc && (scheduleMap[e.to]?.refines||'')===proc);
-      const lv=computeLevels(children, childEdges);
-      const lanes=computeLanes(children, childEdges, lv);
-      extraCols=Math.max(...children.map(r=>lv[r.process]||0),0)+1;
-      extraRows=Math.max(...children.map(r=>lanes[r.process]||0),0)+1;
-      children.forEach(c=>{
-        const sub=estimateSubtree(c.process);
-        extraCols=Math.max(extraCols,(lv[c.process]||0)+sub.cols);
-        extraRows=Math.max(extraRows,(lanes[c.process]||0)+sub.rows+1);
-      });
-    }
-    subtreeSizeCache[proc]={cols:Math.max(1,extraCols||1),rows:Math.max(1,extraRows||1)};
-    return subtreeSizeCache[proc];
-  }
+  networkViewport.contentW=model.contentW;
+  networkViewport.contentH=model.contentH;
+  const positions=model.positions;
+  const containers=model.containers;
+  const dominantEdges=model.dominantEdges;
+  const dominantPath=model.dominantPath;
+  const scheduleMap=model.scheduleMap;
 
-  function computeLocalLayout(rows, edges){
-    const levels=computeLevels(rows, edges);
-    const lanes=computeLanes(rows, edges, levels);
-    return {levels,lanes};
-  }
-
-  function layoutSubgraph(parentKey, rows, edges, originX, originY, depth){
-    if(!rows.length) return {width:240,height:120};
-    const {levels,lanes}=computeLocalLayout(rows, edges);
-    const cardW=depth===0?150:128, cardH=depth===0?62:54;
-    const colGap=92, laneGap=40, innerPad=20, headerGap=16;
-    let maxRight=originX, maxBottom=originY;
-
-    // local reflow: reserve horizontal/vertical space based on expanded descendant size
-    rows.forEach(row=>{
-      const level=levels[row.process]||0;
-      const lane=lanes[row.process]||0;
-      const x=originX+innerPad+level*(cardW+colGap);
-      const y=originY+innerPad+lane*(cardH+laneGap);
-      positions[row.process]={x,y,w:cardW,h:cardH,depth,parentKey};
-      visibleNodeIds.add(row.process);
-      maxRight=Math.max(maxRight,x+cardW);
-      maxBottom=Math.max(maxBottom,y+cardH);
-    });
-
-    const sortedRows=rows.slice().sort((a,b)=>a.earliest_start-b.earliest_start||a.process.localeCompare(b.process));
-    for(const row of sortedRows){
-      const proc=row.process;
-      const childRows=(childrenByParent[proc]||[]).filter(r=>r.process!==proc);
-      if(!childRows.length) continue;
-      const expanded=!!expandedParents[proc];
-      const node=positions[proc];
-      let box={x:node.x-18,y:node.y-18,w:node.w+36,h:node.h+36,expanded,children:childRows.map(r=>r.process)};
-      if(expanded){
-        const childEdges=allEdges.filter(e=>(scheduleMap[e.from]?.refines||'')===proc && (scheduleMap[e.to]?.refines||'')===proc);
-        const childOriginX=node.x-8;
-        const childOriginY=node.y+node.h+headerGap;
-        const sub=layoutSubgraph(proc, childRows, childEdges, childOriginX, childOriginY, depth+1);
-        box.w=Math.max(box.w,(childOriginX-box.x)+sub.width+20);
-        box.h=Math.max(box.h,(childOriginY-box.y)+sub.height+20);
-
-        // local reflow: move only nearby nodes to the right/down if overlap with expanded container
-        rows.forEach(other=>{
-          if(other.process===proc) return;
-          const pos=positions[other.process];
-          if(!pos) return;
-          const horizOverlap=!(pos.x > box.x+box.w+20 || pos.x+pos.w < box.x-20);
-          const vertOverlap=!(pos.y > box.y+box.h+20 || pos.y+pos.h < box.y-20);
-          if(horizOverlap && vertOverlap){
-            if(pos.x >= node.x) pos.x += Math.max(0, box.w - (node.w+36)) + 36;
-            if(pos.y > node.y && pos.x < box.x+box.w) pos.y += Math.max(0, box.h - (node.h+36)) + 24;
-          }
-        });
-        maxRight=Math.max(maxRight,box.x+box.w);
-        maxBottom=Math.max(maxBottom,box.y+box.h);
-      }
-      containers[proc]=box;
-      containerChildren[proc]=childRows.map(r=>r.process);
-    }
-
-    Object.values(positions).forEach(pos=>{
-      if(pos.parentKey===parentKey || parentKey===''){
-        maxRight=Math.max(maxRight,pos.x+pos.w);
-        maxBottom=Math.max(maxBottom,pos.y+pos.h);
-      }
-    });
-    return {width:maxRight-originX+innerPad,height:maxBottom-originY+innerPad};
-  }
-
-  const topRows=(childrenByParent['']||[]).slice().sort((a,b)=>a.earliest_start-b.earliest_start||a.process.localeCompare(b.process));
-  const topEdges=allEdges.filter(e=>(scheduleMap[e.from]?.refines||'')==='' && (scheduleMap[e.to]?.refines||'')==='');
-  const top=layoutSubgraph('', topRows, topEdges, 24, 24, 0);
-  networkViewport.contentW=Math.max(top.width+80,1000);
-  networkViewport.contentH=Math.max(top.height+80,560);
-
-  function rightMid(p){return {x:p.x+p.w,y:p.y+p.h/2};}
-  function leftMid(p){return {x:p.x,y:p.y+p.h/2};}
-  function topMid(p){return {x:p.x+p.w/2,y:p.y};}
-  function bottomMid(p){return {x:p.x+p.w/2,y:p.y+p.h};}
-  function intersectsBoxSegment(a,b,box){
-    if(a.x===b.x){
-      const x=a.x;
-      if(x<=box.x||x>=box.x+box.w) return false;
-      const y1=Math.min(a.y,b.y), y2=Math.max(a.y,b.y);
-      return !(y2<=box.y||y1>=box.y+box.h);
-    }
-    if(a.y===b.y){
-      const y=a.y;
-      if(y<=box.y||y>=box.y+box.h) return false;
-      const x1=Math.min(a.x,b.x), x2=Math.max(a.x,b.x);
-      return !(x2<=box.x||x1>=box.x+box.w);
-    }
-    return false;
-  }
-  function orthoPath(start,end,excludeIds=[]){
-    const boxes=Object.entries(positions).filter(([id])=>!excludeIds.includes(id)).map(([,p])=>p);
-    let points=[];
-    if(end.x >= start.x + 30){
-      const midX=(start.x+end.x)/2;
-      points=[start,{x:midX,y:start.y},{x:midX,y:end.y},end];
-    } else if(end.y >= start.y + 30){
-      const midY=(start.y+end.y)/2;
-      points=[start,{x:start.x,y:midY},{x:end.x,y:midY},end];
-    } else {
-      const doglegX=start.x+28;
-      const midY=(start.y+end.y)/2;
-      points=[start,{x:doglegX,y:start.y},{x:doglegX,y:midY},{x:end.x-28,y:midY},{x:end.x-28,y:end.y},end];
-    }
-    // route adjustment: if a segment intersects any box, offset it
-    for(let i=0;i<points.length-1;i++){
-      for(const box of boxes){
-        if(intersectsBoxSegment(points[i],points[i+1],box)){
-          if(points[i].x===points[i+1].x){
-            points[i].x=points[i+1].x=box.x+box.w+18;
-          }else if(points[i].y===points[i+1].y){
-            points[i].y=points[i+1].y=box.y+box.h+18;
-          }
-        }
-      }
-    }
-    return points.map((p,idx)=>`${idx===0?'M':'L'} ${p.x} ${p.y}`).join(' ');
-  }
-  function drawEdge(fromId,toId,color,strokeW,marker){
-    const from=positions[fromId], to=positions[toId];
-    if(!from||!to) return '';
-    const dx=to.x-from.x, dy=to.y-from.y;
-    let start, end;
-    if(Math.abs(dx) >= Math.abs(dy)){
-      start=dx>=0?rightMid(from):leftMid(from);
-      end=dx>=0?leftMid(to):rightMid(to);
-    }else{
-      start=dy>=0?bottomMid(from):topMid(from);
-      end=dy>=0?topMid(to):bottomMid(to);
-    }
-    const d=orthoPath(start,end,[fromId,toId]);
-    return `<path d="${d}" fill="none" stroke="${color}" stroke-width="${strokeW}" marker-end="url(#${marker})" stroke-linecap="round" stroke-linejoin="round" />`;
-  }
-  function taskCard(node,row,isTop,isDominant){
-    const dur=Math.round((row.duration||0)*1000)/1000;
+  function cardMarkup(node,row,isDominant){
     const es=Math.round((row.earliest_start||0)*1000)/1000;
     const ef=Math.round((row.earliest_finish||0)*1000)/1000;
+    const dur=Math.round((row.duration||0)*1000)/1000;
     const stroke=isDominant?'#dc2626':'#334155';
-    const strokeW=isDominant?2.8:1.3;
-    const headerH=isTop?18:16;
-    const fontMain=isTop?13:12;
-    const fontMeta=isTop?10:9;
-    const hasChildren=(childrenByParent[row.process]||[]).filter(r=>r.process!==row.process).length>0;
-    const detailVisible=networkViewport.scale>=0.9;
-    const metaOpacity=networkViewport.scale<0.55?0:1;
-    const toggle=hasChildren?`<g data-toggle-parent="1" onclick="toggleParent('${row.process}')" style="cursor:pointer"><rect x="${node.x+node.w-22}" y="${node.y+4}" width="16" height="16" rx="4" fill="#ffffff" stroke="#94a3b8" stroke-width="1.1" /><text x="${node.x+node.w-14}" y="${node.y+16}" text-anchor="middle" font-size="12" fill="#334155">${expandedParents[row.process]?'-':'+'}</text></g>`:'';
-    return `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="${isTop?10:9}" fill="#ffffff" stroke="${stroke}" stroke-width="${strokeW}" /><line x1="${node.x}" y1="${node.y+headerH}" x2="${node.x+node.w}" y2="${node.y+headerH}" stroke="#dbe2ea" stroke-width="1" /><text x="${node.x+8}" y="${node.y+12}" font-size="${fontMeta}" fill="#64748b">${isTop?'Task':'Subtask'}</text>${toggle}<text x="${node.x+node.w/2}" y="${node.y+headerH+16}" text-anchor="middle" font-size="${fontMain}" fill="#111827">${esc(row.process)}</text>${detailVisible?`<text x="${node.x+8}" y="${node.y+node.h-10}" font-size="${fontMeta}" fill="#475569" opacity="${metaOpacity}">ES ${es}</text><text x="${node.x+node.w/2}" y="${node.y+node.h-10}" text-anchor="middle" font-size="${fontMeta}" fill="#475569" opacity="${metaOpacity}">Dur ${dur}</text><text x="${node.x+node.w-8}" y="${node.y+node.h-10}" text-anchor="end" font-size="${fontMeta}" fill="#475569" opacity="${metaOpacity}">EF ${ef}</text>`:''}`;
+    const strokeW=isDominant?2.6:1.2;
+    return `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="8" fill="#ffffff" stroke="${stroke}" stroke-width="${strokeW}" />`+
+      `<text x="${node.x+node.w/2}" y="${node.y+24}" text-anchor="middle" font-size="13" fill="#111827">${esc(row.process)}</text>`+
+      `<text x="${node.x+10}" y="${node.y+51}" font-size="10" fill="#64748b">Start ${es}</text>`+
+      `<text x="${node.x+node.w/2}" y="${node.y+51}" text-anchor="middle" font-size="10" fill="#64748b">Dur ${dur}</text>`+
+      `<text x="${node.x+node.w-10}" y="${node.y+51}" text-anchor="end" font-size="10" fill="#64748b">End ${ef}</text>`;
   }
 
-  let svg=`<svg id="networkSvgRoot" width="100%" height="680" viewBox="0 0 ${networkViewport.contentW} ${networkViewport.contentH}" preserveAspectRatio="xMidYMid meet"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#64748b" /></marker><marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#dc2626" /></marker><pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 24" fill="none" stroke="#f1f5f9" stroke-width="1"/></pattern></defs><rect x="0" y="0" width="${networkViewport.contentW}" height="${networkViewport.contentH}" fill="#fbfcfe"/><rect x="0" y="0" width="${networkViewport.contentW}" height="${networkViewport.contentH}" fill="url(#grid)"/><g id="networkPanZoomGroup">`;
+  let svg=`<svg id="networkSvgRoot" width="100%" height="680" viewBox="0 0 ${model.contentW} ${model.contentH}" preserveAspectRatio="xMidYMid meet"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#5b6b80" /></marker><marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#dc2626" /></marker><pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 24" fill="none" stroke="#f3f6f9" stroke-width="1"/></pattern></defs><rect x="0" y="0" width="${model.contentW}" height="${model.contentH}" fill="#fcfdff"/><rect x="0" y="0" width="${model.contentW}" height="${model.contentH}" fill="url(#grid)"/><g id="networkPanZoomGroup">`;
 
-  Object.entries(containers).forEach(([proc,box])=>{
-    if(!visibleNodeIds.has(proc)) return;
-    svg+=`<rect x="${box.x}" y="${box.y}" width="${box.w}" height="${box.h}" rx="18" fill="rgba(148,163,184,0.06)" stroke="#cfd8e3" stroke-width="1.4" />`;
+  Object.entries(containers).forEach(([proc,c])=>{
+    svg += `<rect x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}" rx="14" fill="rgba(148,163,184,0.05)" stroke="#d4dde7" stroke-width="1.2" />`;
   });
 
-  const dominantPath=new Set(data.dominant_path||[]);
-  const dominantEdges=new Set((data.critical_edges||[]).map(e=>`${e.from}__${e.to}`));
-  allEdges.forEach(e=>{
-    if(!visibleNodeIds.has(e.from) || !visibleNodeIds.has(e.to)) return;
-    const isTop=(scheduleMap[e.from]?.depth||0)===0 && (scheduleMap[e.to]?.depth||0)===0;
-    const isDom=isTop && dominantEdges.has(`${e.from}__${e.to}`);
-    svg+=drawEdge(e.from,e.to,isDom?'#dc2626':'#7b8ba1',isDom?3:1.8,isDom?'arrowRed':'arrow');
+  model.routes.forEach(route=>{
+    const isDom=dominantEdges.has(`${route.from}__${route.to}`);
+    svg += drawOrthoPath(route.points, isDom?'#dc2626':'#6b7c93', isDom?2.9:1.9, isDom?'arrowRed':'arrow');
   });
 
   Object.entries(positions).forEach(([proc,node])=>{
-    if(!visibleNodeIds.has(proc)) return;
-    const row=scheduleMap[proc];
-    svg+=taskCard(node,row,node.depth===0,node.depth===0 && dominantPath.has(proc));
+    svg += cardMarkup(node, scheduleMap[proc], dominantPath.has(proc));
   });
 
-  svg+=`</g></svg>`;
-  document.getElementById('networkContainer').innerHTML=svg;
+  svg += `</g></svg>`;
+  const host=document.getElementById('networkContainer');
+  host.innerHTML=svg;
+  host.dataset.validation = report.ok ? 'ok' : 'invalid';
   if(shouldFit){fitNetwork();}else{applyNetworkTransform();}
   installNetworkInteraction();
 }
+
 function renderScheduleTable(data){
   const schedule=data.schedule||[],table=document.getElementById('scheduleTable');
   let html=`<thead><tr><th>Process</th><th>Refines</th><th>Depth</th><th>Duration token</th><th>Resolved duration</th><th>ES</th><th>EF</th><th>LS</th><th>LF</th><th>Float</th><th>Critical</th></tr></thead><tbody>`;
